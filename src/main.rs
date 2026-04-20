@@ -5,7 +5,9 @@ use livi::{
     EmptyPortConnections, FeaturesBuilder, Instance, Plugin, PortType, WorkerManager,
     World, event::LV2AtomSequence,
 };
+use serde::Deserialize;
 use std::cmp::min;
+use std::collections::HashMap;
 use std::io::BufWriter;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,16 +18,18 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::probe::Hint;
 use symphonia::core::errors::Error as SymphoniaError;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 struct PluginSetting {
+    #[serde(rename = "name")]
     plugin_identifier: String,
-    params: Vec<(String, f32)>,
+    #[serde(default)]
+    params: HashMap<String, f32>,
 }
 
 fn parse_plugin_setting(s: &str) -> Result<PluginSetting, String> {
     let parts: Vec<&str> = s.split(':').collect();
     let plugin_identifier = parts[0].to_string();
-    let mut params = Vec::new();
+    let mut params = HashMap::new();
     for i in 1..parts.len() {
         let param_part = parts[i];
         let kv: Vec<&str> = param_part.split('=').collect();
@@ -33,13 +37,18 @@ fn parse_plugin_setting(s: &str) -> Result<PluginSetting, String> {
             let value = kv[1]
                 .parse::<f32>()
                 .map_err(|_| format!("Invalid numeric value: {}", kv[1]))?;
-            params.push((kv[0].to_string(), value));
+            params.insert(kv[0].to_string(), value);
         }
     }
     Ok(PluginSetting {
         plugin_identifier,
         params,
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct Config {
+    plugins: Vec<PluginSetting>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -52,6 +61,10 @@ struct Args {
     /// Output processed WAV file path
     #[arg(short, long)]
     output: PathBuf,
+
+    /// Effect chain YAML file path
+    #[arg(short = 'f', long)]
+    file: Option<PathBuf>,
 
     /// List of plugins and parameters (e.g. "plugin_name:param=val")
     #[arg(trailing_var_arg = true, value_parser = parse_plugin_setting)]
@@ -81,9 +94,19 @@ fn main() -> Result<()> {
     println!("Initializing LV2 world...");
     let world = World::new();
 
-    if args.plugins.is_empty() {
-        bail!("At least one plugin must be specified");
-    }
+    // Determine plugin chain
+    let plugins = if let Some(config_path) = &args.file {
+        let file = std::fs::File::open(config_path)
+            .with_context(|| format!("Failed to open config file: {:?}", config_path))?;
+        let config: Config = serde_yaml::from_reader(file)
+            .with_context(|| format!("Failed to parse YAML config: {:?}", config_path))?;
+        config.plugins
+    } else {
+        if args.plugins.is_empty() {
+            bail!("At least one plugin must be specified via CLI or config file (-f)");
+        }
+        args.plugins
+    };
 
     // Phase A: Input Probing
     println!("Probing input file: {:?}", args.input);
@@ -107,7 +130,7 @@ fn main() -> Result<()> {
     let mut instances = Vec::new();
     let mut current_channels = num_channels;
 
-    for (i, p_setting) in args.plugins.iter().enumerate() {
+    for (i, p_setting) in plugins.iter().enumerate() {
         let plugin = find_plugin(&world, &p_setting.plugin_identifier)
             .with_context(|| format!("Plugin '{}' not found", p_setting.plugin_identifier))?;
 
@@ -204,7 +227,7 @@ fn find_plugin(world: &World, identifier: &str) -> Option<Plugin> {
     if matches.len() == 1 { Some(matches[0].clone()) } else { None }
 }
 
-fn apply_parameter_settings(plugin: &Plugin, control_inputs: &mut [f32], settings: &[(String, f32)]) -> Result<()> {
+fn apply_parameter_settings(plugin: &Plugin, control_inputs: &mut [f32], settings: &HashMap<String, f32>) -> Result<()> {
     let ports: Vec<_> = plugin.ports_with_type(PortType::ControlInput).collect();
     for (param, value) in settings {
         let port_idx = ports.iter().position(|p| p.name.to_lowercase() == param.to_lowercase());

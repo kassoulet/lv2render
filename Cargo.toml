@@ -1,0 +1,13 @@
+[package]
+name = "lv2render"
+version = "0.1.0"
+edition = "2021"
+description = "A high-performance, CLI-based offline audio processor for LV2 plugins"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+livi = "0.4"
+symphonia = { version = "0.5", features = ["all"] }
+hound = "3"
+anyhow = "1"
+thiserror = "1"

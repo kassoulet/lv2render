@@ -4,20 +4,20 @@ A high-performance, CLI-based offline audio processor for LV2 plugins written in
 
 ## Overview
 
-`lv2render` is a headless LV2 plugin host designed specifically for non-real-time (offline) audio processing. It reads an audio file, streams it through a specified LV2 plugin, and writes the processed output to a new file as fast as the CPU allows.
+`lv2render` is a headless LV2 plugin host designed specifically for non-real-time (offline) audio processing. It reads an audio file, streams it through a chain of LV2 plugins, and writes the processed output to a new file as fast as the CPU allows.
 
 ## Features
 
-- **Multi-format audio input**: Supports WAV, FLAC, MP3, AAC, OGG, and more via Symphonia
-- **LV2 plugin hosting**: Full LV2 plugin support via livi (lilv wrapper)
-- **Worker support**: Synchronous LV2 worker task handling for plugins like `master_me`
-- **Parameter control**: List and set plugin control port parameters
-- **Channel mapping**: Automatic mono-to-stereo upmixing when needed
-- **Float processing**: Internal 32-bit float processing to avoid clipping
-- **Plugin draining**: Configurable tail capture for reverb/delay effects
-- **Latency detection**: Framework for plugin latency compensation
-- **Enhanced progress**: Real-time progress with percentage and ETA
-- **Optimized performance**: Pre-allocated buffers for maximum speed
+- **Sequential Plugin Chaining**: Apply multiple plugins in a single pass.
+- **Flexible Configuration**: Define effect chains via CLI arguments or YAML files.
+- **Multi-format audio input**: Supports WAV, FLAC, MP3, AAC, OGG, and more via Symphonia.
+- **LV2 plugin hosting**: Full LV2 plugin support via livi (lilv wrapper).
+- **Worker support**: Synchronous LV2 worker task handling for plugins like `master_me`.
+- **Parameter control**: Override any control port parameter.
+- **Channel mapping**: Automatic mono-to-stereo upmixing for the first plugin in the chain.
+- **Float processing**: Internal 32-bit float processing to maintain high fidelity.
+- **Plugin draining**: Configurable tail capture for reverb/delay effects.
+- **Optimized performance**: Pre-allocated buffers and zero-allocation hot loop.
 
 ## Installation
 
@@ -25,106 +25,74 @@ A high-performance, CLI-based offline audio processor for LV2 plugins written in
 cargo build --release
 ```
 
-The binary will be at `target/release/lv2render` (or in your configured target directory).
+The binary will be at `target/release/lv2render`.
 
 ## Usage
 
 ```bash
-lv2render <PLUGIN_IDENTIFIER> <INPUT_FILE> <OUTPUT_FILE> [OPTIONS]
+lv2render -i <INPUT_FILE> -o <OUTPUT_FILE> [CHAIN...] [OPTIONS]
 ```
 
 ### Arguments
 
-- `PLUGIN_IDENTIFIER`: LV2 plugin URI or unique name substring (e.g., `calf`, `mdaEPiano`, `master_me`)
-- `INPUT_FILE`: Path to source audio file (WAV, FLAC, MP3, etc.)
-- `OUTPUT_FILE`: Path for the processed output WAV file
+- `-i, --input <INPUT_FILE>`: Path to source audio file.
+- `-o, --output <OUTPUT_FILE>`: Path for the processed output WAV file.
+- `[CHAIN...]`: A list of plugins to apply. Format: `"plugin_name:param1=val1:param2=val2"`.
 
 ### Options
 
-- `--block-size <BLOCK_SIZE>`: Number of samples per processing cycle (default: 1024)
-- `--list-params`: Print all available control ports for the selected plugin and exit
-- `--set <PARAM=VALUE>`: Set plugin parameter (can be used multiple times)
-- `--drain-seconds <DRAIN_SECONDS>`: Seconds of silence to drain after input EOF (default: 2.0)
-- `-h, --help`: Print help information
-- `-V, --version`: Print version information
+- `-f, --file <YAML_FILE>`: Path to a YAML file defining the effect chain.
+- `--block-size <BLOCK_SIZE>`: Samples per processing cycle (default: 1024).
+- `--drain-seconds <SECONDS>`: Seconds of silence to process after EOF (default: 2.0).
 
-## Examples
+## Chain Configuration
 
-### List plugin parameters
+### CLI Chain
+
+Plugins are applied in the order they appear on the command line.
 
 ```bash
-lv2render "calf" input.wav output.wav --list-params
+lv2render -i in.wav -o out.wav "calf Reverb:decay_time=0.5" "master_me:input gain=3" "BassEnhancer"
 ```
 
-### Process audio with default parameters
+### YAML Chain (`-f`)
 
-```bash
-lv2render "Compressor" input.flac output.wav
+For complex setups, use a YAML file. It supports multiple formats:
+
+```yaml
+# effect-chain.yaml
+- "calf Reverb:decay_time=0.5" # String format
+- master_me:                   # Key-List format
+    - leveler bypass=1
+    - input gain=3
+- BassEnhancer                 # Simple name
 ```
 
-### Process with custom parameter settings
-
+Run with:
 ```bash
-lv2render "calf" input.mp3 output.wav --set "Threshold=-20" --set "Ratio=4"
-```
-
-### Process with custom block size
-
-```bash
-lv2render "Reverb" input.wav output.wav --block-size 2048
-```
-
-### Process with custom drain time
-
-```bash
-lv2render "Reverb" input.wav output.wav --drain-seconds 5.0
+lv2render -i input.wav -o output.wav -f effect-chain.yaml
 ```
 
 ## Architecture
 
-### Tech Stack
-
-- **Language**: Rust (Edition 2021)
-- **Plugin Hosting**: `livi` (Rust wrapper for `lilv`)
-- **Audio I/O**: `symphonia` (multi-format decoding) and `hound` (WAV encoding)
-- **CLI parsing**: `clap` with derive features
-- **Worker support**: `WorkerManager` for async LV2 worker tasks
-
 ### Processing Flow
 
-1. **Initialization**: Create LV2 world and discover plugin
-2. **Audio Preparation**: Probe input file to determine sample rate and channels
-3. **Plugin Instantiation**: Create plugin instance matching audio specs
-4. **Latency Detection**: Check for plugin latency port
-5. **Processing Loop**:
-   - Decode audio chunks from input file
-   - Convert to float and map channels (with proper mono-to-stereo upmix)
-   - Process through plugin's `run()` method at full block size
-   - Handle worker tasks synchronously
-   - Write processed output to WAV file
-6. **Drain Phase**: Continue processing silence to capture effect tails
-7. **Finalize**: Complete WAV file and report statistics
-
-### Performance Optimizations
-
-- **Buffer Pre-allocation**: All buffers allocated once before processing loop
-- **Reduced Copying**: Direct sample conversion minimizes memory operations
-- **Block Size Compliance**: Always runs plugin at configured block size
-- **Progress Reporting**: ETA and percentage calculated from total frames
+1. **Initialization**: Discover all plugins in the chain.
+2. **Audio Preparation**: Probe input file for sample rate and channels.
+3. **Chain Setup**: Instantiate plugins and verify channel compatibility between stages.
+4. **Processing Loop**:
+   - Decode audio chunks.
+   - Flow audio through the plugin chain (Buffer swapping between stages).
+   - Handle worker tasks synchronously for each plugin.
+   - Write final output to WAV.
+5. **Drain Phase**: Capture tails (reverb/delay) for all plugins in the chain.
 
 ### Channel Handling
 
-- Mono input → Stereo plugin: Automatic upmix (duplicate channel)
-- Sample format conversion: All formats converted to 32-bit float internally
-- Output: Always 32-bit float WAV file
-
-## Limitations
-
-- Output format is always 32-bit float WAV
-- Latency compensation framework is in place but full implementation requires plugin-specific handling
-- MIDI/Atom sequence ports not yet supported
-- Only processes first audio track found in file
+- **First Plugin**: Supports mono-to-stereo upmix if the input is mono and the plugin is stereo.
+- **The Chain**: Each plugin must have an input channel count matching the output of the previous plugin.
+- **Output**: Always 32-bit float WAV.
 
 ## License
 
-MIT/Apache-2.0 (same as project template)
+MIT/Apache-2.0

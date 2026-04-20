@@ -5,7 +5,6 @@ use livi::{
     EmptyPortConnections, FeaturesBuilder, Instance, Plugin, PortType, WorkerManager,
     World, event::LV2AtomSequence,
 };
-use serde::Deserialize;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::io::BufWriter;
@@ -18,11 +17,9 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::probe::Hint;
 use symphonia::core::errors::Error as SymphoniaError;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 struct PluginSetting {
-    #[serde(rename = "name")]
     plugin_identifier: String,
-    #[serde(default)]
     params: HashMap<String, f32>,
 }
 
@@ -30,9 +27,8 @@ fn parse_plugin_setting(s: &str) -> Result<PluginSetting, String> {
     let parts: Vec<&str> = s.split(':').collect();
     let plugin_identifier = parts[0].to_string();
     let mut params = HashMap::new();
-    for i in 1..parts.len() {
-        let param_part = parts[i];
-        let kv: Vec<&str> = param_part.split('=').collect();
+    for part in parts.iter().skip(1) {
+        let kv: Vec<&str> = part.split('=').collect();
         if kv.len() == 2 {
             let value = kv[1]
                 .parse::<f32>()
@@ -44,11 +40,6 @@ fn parse_plugin_setting(s: &str) -> Result<PluginSetting, String> {
         plugin_identifier,
         params,
     })
-}
-
-#[derive(Debug, Deserialize)]
-struct Config {
-    plugins: Vec<PluginSetting>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -89,18 +80,67 @@ struct PluginInstance {
     audio_outputs: Vec<Vec<f32>>,
 }
 
+type InputAudioInfo = (
+    Box<dyn symphonia::core::formats::FormatReader>,
+    symphonia::core::formats::Track,
+    u32,
+    usize,
+    u64,
+);
+
 fn main() -> Result<()> {
     let args = Args::parse();
     println!("Initializing LV2 world...");
     let world = World::new();
 
-    // Determine plugin chain
     let plugins = if let Some(config_path) = &args.file {
         let file = std::fs::File::open(config_path)
             .with_context(|| format!("Failed to open config file: {:?}", config_path))?;
-        let config: Config = serde_yaml::from_reader(file)
-            .with_context(|| format!("Failed to parse YAML config: {:?}", config_path))?;
-        config.plugins
+        
+        let yaml_val: serde_yaml::Value = serde_yaml::from_reader(file)
+            .with_context(|| format!("Failed to parse YAML: {:?}", config_path))?;
+        
+        let mut chain = Vec::new();
+        let items = if let Some(p) = yaml_val.get("plugins") {
+            p.as_sequence().ok_or_else(|| anyhow!("'plugins' must be a list"))?
+        } else if let Some(s) = yaml_val.as_sequence() {
+            s
+        } else {
+            bail!("YAML must be a list of plugins or contain a 'plugins' key");
+        };
+
+        for item in items {
+            if let Some(s) = item.as_str() {
+                chain.push(parse_plugin_setting(s).map_err(|e| anyhow!(e))?);
+            } else if let Some(m) = item.as_mapping() {
+                for (k, v) in m {
+                    let name = k.as_str().ok_or_else(|| anyhow!("Plugin name must be a string"))?;
+                    let mut params = HashMap::new();
+                    
+                    if let Some(param_str) = v.as_str() {
+                        add_params_from_str(&mut params, param_str)?;
+                    } else if let Some(param_list) = v.as_sequence() {
+                        for p in param_list {
+                            if let Some(ps) = p.as_str() {
+                                add_params_from_str(&mut params, ps)?;
+                            }
+                        }
+                    } else if let Some(param_map) = v.as_mapping() {
+                        for (pk, pv) in param_map {
+                            let p_name = pk.as_str().ok_or_else(|| anyhow!("Param name must be a string"))?;
+                            let p_val = pv.as_f64().ok_or_else(|| anyhow!("Param value for '{}' must be a number", p_name))? as f32;
+                            params.insert(p_name.to_string(), p_val);
+                        }
+                    }
+                    
+                    chain.push(PluginSetting {
+                        plugin_identifier: name.to_string(),
+                        params,
+                    });
+                }
+            }
+        }
+        chain
     } else {
         if args.plugins.is_empty() {
             bail!("At least one plugin must be specified via CLI or config file (-f)");
@@ -108,7 +148,6 @@ fn main() -> Result<()> {
         args.plugins
     };
 
-    // Phase A: Input Probing
     println!("Probing input file: {:?}", args.input);
     let (mut format, track, sample_rate, num_channels, total_frames) =
         setup_input_audio(&args.input)?;
@@ -118,8 +157,8 @@ fn main() -> Result<()> {
         sample_rate, num_channels, total_frames
     );
 
-    // Phase B: Plugin Chain Initialization
     let block_size = args.block_size as usize;
+    #[allow(clippy::arc_with_non_send_sync)]
     let worker_manager = Arc::new(WorkerManager::default());
     let features = world.build_features(FeaturesBuilder {
         min_block_length: block_size,
@@ -138,7 +177,6 @@ fn main() -> Result<()> {
 
         let port_counts = plugin.port_counts();
         if i == 0 {
-            // Check compatibility with input audio
             if num_channels != port_counts.audio_inputs {
                 if port_counts.audio_inputs == 2 && num_channels == 1 {
                     println!("Note: Upmixing mono input to stereo for first plugin");
@@ -146,14 +184,11 @@ fn main() -> Result<()> {
                     bail!("Channel mismatch: input has {} channels, first plugin expects {}", num_channels, port_counts.audio_inputs);
                 }
             }
-        } else {
-            // Check compatibility with previous plugin
-            if current_channels != port_counts.audio_inputs {
-                bail!("Chain mismatch: plugin {} outputs {} channels, but plugin {} expects {}", i, current_channels, i+1, port_counts.audio_inputs);
-            }
+        } else if current_channels != port_counts.audio_inputs {
+            bail!("Chain mismatch: plugin {} outputs {} channels, but plugin {} expects {}", i, current_channels, i+1, port_counts.audio_inputs);
         }
 
-        let mut instance = unsafe {
+        let instance = unsafe {
             plugin
                 .instantiate(features.clone(), sample_rate as f64)
                 .map_err(|e| anyhow!("Failed to instantiate plugin: {:?}", e))?
@@ -186,7 +221,6 @@ fn main() -> Result<()> {
         });
     }
 
-    // Phase C: Output Setup
     let wav_spec = hound::WavSpec {
         channels: current_channels as u16,
         sample_rate,
@@ -194,12 +228,9 @@ fn main() -> Result<()> {
         sample_format: hound::SampleFormat::Float,
     };
 
-    let file = std::fs::File::create(&args.output)
-        .with_context(|| format!("Failed to create output file: {:?}", args.output))?;
-    let writer = WavWriter::new(BufWriter::new(file), wav_spec)
-        .with_context(|| format!("Failed to create WAV writer"))?;
+    let file = std::fs::File::create(&args.output)?;
+    let writer = WavWriter::new(BufWriter::new(file), wav_spec)?;
 
-    // Phase D: Processing
     println!("Starting processing loop with {} plugins...", instances.len());
     process_audio(
         format.as_mut(),
@@ -209,11 +240,27 @@ fn main() -> Result<()> {
         block_size,
         num_channels,
         &worker_manager,
-        &features,
         args.drain_seconds,
     )?;
 
     println!("Processing complete. Output written to: {:?}", args.output);
+    Ok(())
+}
+
+fn add_params_from_str(params: &mut HashMap<String, f32>, s: &str) -> Result<()> {
+    let kv: Vec<&str> = s.split('=').collect();
+    if kv.len() == 2 {
+        let value = kv[1].parse::<f32>().map_err(|_| anyhow!("Invalid numeric value: {}", kv[1]))?;
+        params.insert(kv[0].trim().to_string(), value);
+    } else {
+        for part in s.split(':') {
+            let inner_kv: Vec<&str> = part.split('=').collect();
+            if inner_kv.len() == 2 {
+                let value = inner_kv[1].parse::<f32>().map_err(|_| anyhow!("Invalid numeric value: {}", inner_kv[1]))?;
+                params.insert(inner_kv[0].trim().to_string(), value);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -241,7 +288,7 @@ fn apply_parameter_settings(plugin: &Plugin, control_inputs: &mut [f32], setting
     Ok(())
 }
 
-fn setup_input_audio(input_path: &PathBuf) -> Result<(Box<dyn symphonia::core::formats::FormatReader>, symphonia::core::formats::Track, u32, usize, u64)> {
+fn setup_input_audio(input_path: &PathBuf) -> Result<InputAudioInfo> {
     let file = std::fs::File::open(input_path)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -252,9 +299,11 @@ fn setup_input_audio(input_path: &PathBuf) -> Result<(Box<dyn symphonia::core::f
     let track = format.tracks().iter().find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL).context("No audio")?.clone();
     let sample_rate = track.codec_params.sample_rate.context("No sample rate")?;
     let num_channels = track.codec_params.channels.map(|ch| ch.count()).context("No channels")?;
-    Ok((format, track, sample_rate, num_channels, track.codec_params.n_frames.unwrap_or(0)))
+    let n_frames = track.codec_params.n_frames.unwrap_or(0);
+    Ok((format, track, sample_rate, num_channels, n_frames))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_audio(
     format: &mut dyn symphonia::core::formats::FormatReader,
     track: symphonia::core::formats::Track,
@@ -263,7 +312,6 @@ fn process_audio(
     block_size: usize,
     input_channels: usize,
     worker_manager: &Arc<WorkerManager>,
-    features: &Arc<livi::Features>,
     drain_seconds: f64,
 ) -> Result<()> {
     let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
@@ -283,13 +331,16 @@ fn process_audio(
     let mut decode_buffer: Option<Vec<Vec<f32>>> = None;
 
     loop {
-        let mut current_frame_count = 0;
+        let frames_in_chunk;
         if is_draining {
             if drain_remaining == 0 { break; }
             let chunk = min(block_size, drain_remaining);
-            current_frame_count = chunk;
+            frames_in_chunk = chunk;
             let buf = decode_buffer.get_or_insert_with(|| vec![vec![0.0f32; block_size]; input_channels]);
-            for ch in 0..input_channels { buf[ch].resize(chunk, 0.0); buf[ch].fill(0.0); }
+            for ch_buf in buf.iter_mut().take(input_channels) {
+                ch_buf.resize(chunk, 0.0);
+                ch_buf.fill(0.0);
+            }
             drain_remaining = drain_remaining.saturating_sub(chunk);
         } else {
             match format.next_packet() {
@@ -298,9 +349,11 @@ fn process_audio(
                         let num_frames = decoded.frames();
                         let num_chans = decoded.spec().channels.count();
                         let buf = decode_buffer.get_or_insert_with(|| vec![vec![0.0f32; 0]; num_chans]);
-                        for ch in 0..num_chans { buf[ch].resize(num_frames, 0.0); }
+                        for ch_buf in buf.iter_mut().take(num_chans) {
+                            ch_buf.resize(num_frames, 0.0);
+                        }
                         copy_to_f32_buffer(decoded, buf);
-                        current_frame_count = num_frames;
+                        frames_in_chunk = num_frames;
                         frames_decoded += num_frames as u64;
                     }
                     Err(_) => continue,
@@ -316,10 +369,9 @@ fn process_audio(
 
         let audio_buf = decode_buffer.as_ref().unwrap();
         let mut offset = 0;
-        while offset < current_frame_count {
-            let chunk_size = min(current_frame_count - offset, block_size);
+        while offset < frames_in_chunk {
+            let chunk_size = min(frames_in_chunk - offset, block_size);
 
-            // 1. Prepare input for the first plugin
             for ch in 0..first_plugin_input_count {
                 let dst_start = ch * block_size;
                 if ch < audio_buf.len() {
@@ -332,37 +384,36 @@ fn process_audio(
             }
             if needs_upmix { input_buffer.copy_within(0..block_size, block_size); }
 
-            // 2. Process through the chain
             for i in 0..instances.len() {
+                let (prev, curr) = instances.split_at_mut(i);
+                let inst = &mut curr[0];
+
                 let (audio_inputs, audio_outputs) = if i == 0 {
-                    // First plugin takes from input_buffer
                     let inputs: Vec<&[f32]> = (0..first_plugin_input_count).map(|ch| &input_buffer[ch * block_size..(ch + 1) * block_size]).collect();
-                    let outputs: Vec<&mut [f32]> = instances[i].audio_outputs.iter_mut().map(|b| b.as_mut_slice()).collect();
+                    let outputs: Vec<&mut [f32]> = inst.audio_outputs.iter_mut().map(|b| b.as_mut_slice()).collect();
                     (inputs, outputs)
                 } else {
-                    // Subsequent plugins take from the previous plugin's output
-                    let (prev, curr) = split_at_mut(instances, i);
-                    let inputs: Vec<&[f32]> = prev.last().unwrap().audio_outputs.iter().map(|b| b.as_slice()).collect();
-                    let outputs: Vec<&mut [f32]> = curr[0].audio_outputs.iter_mut().map(|b| b.as_mut_slice()).collect();
+                    let prev_inst = &prev[i-1];
+                    let inputs: Vec<&[f32]> = prev_inst.audio_outputs.iter().map(|b| b.as_slice()).collect();
+                    let outputs: Vec<&mut [f32]> = inst.audio_outputs.iter_mut().map(|b| b.as_mut_slice()).collect();
                     (inputs, outputs)
                 };
 
-                for seq in &mut instances[i].atom_sequence_inputs { seq.clear(); }
-                for seq in &mut instances[i].atom_sequence_outputs { seq.clear(); }
+                for seq in &mut inst.atom_sequence_inputs { seq.clear(); }
+                for seq in &mut inst.atom_sequence_outputs { seq.clear(); }
 
                 let ports = EmptyPortConnections::new(block_size)
-                    .with_control_inputs(instances[i].control_inputs.iter())
-                    .with_control_outputs(instances[i].control_outputs.iter_mut())
+                    .with_control_inputs(inst.control_inputs.iter())
+                    .with_control_outputs(inst.control_outputs.iter_mut())
                     .with_audio_inputs(audio_inputs.into_iter())
                     .with_audio_outputs(audio_outputs.into_iter())
-                    .with_atom_sequence_inputs(instances[i].atom_sequence_inputs.iter())
-                    .with_atom_sequence_outputs(instances[i].atom_sequence_outputs.iter_mut());
+                    .with_atom_sequence_inputs(inst.atom_sequence_inputs.iter())
+                    .with_atom_sequence_outputs(inst.atom_sequence_outputs.iter_mut());
 
-                unsafe { instances[i].instance.run(ports).map_err(|e| anyhow!("Plugin run failed: {:?}", e))?; }
+                unsafe { inst.instance.run(ports).map_err(|e| anyhow!("Plugin run failed: {:?}", e))?; }
                 worker_manager.run_workers();
             }
 
-            // 3. Write final output
             let final_outputs = &instances.last().unwrap().audio_outputs;
             for frame_idx in 0..chunk_size {
                 for ch_buf in final_outputs {
@@ -390,21 +441,17 @@ fn process_audio(
     Ok(())
 }
 
-fn split_at_mut<T>(slice: &mut [T], index: usize) -> (&mut [T], &mut [T]) {
-    slice.split_at_mut(index)
-}
-
 fn copy_to_f32_buffer(buf: AudioBufferRef<'_>, result: &mut [Vec<f32>]) {
     match buf {
-        AudioBufferRef::U8(b) => { for ch in 0..b.spec().channels.count() { for (i, &s) in b.chan(ch).iter().enumerate() { result[ch][i] = (s as f32 - 128.0) / 128.0; } } }
-        AudioBufferRef::U16(b) => { for ch in 0..b.spec().channels.count() { for (i, &s) in b.chan(ch).iter().enumerate() { result[ch][i] = (s as f32 - 32768.0) / 32768.0; } } }
-        AudioBufferRef::U24(b) => { for ch in 0..b.spec().channels.count() { for (i, &s) in b.chan(ch).iter().enumerate() { result[ch][i] = (s.0 as f32 - 8388608.0) / 8388608.0; } } }
-        AudioBufferRef::U32(b) => { for ch in 0..b.spec().channels.count() { for (i, &s) in b.chan(ch).iter().enumerate() { result[ch][i] = (s as f32 - 2147483648.0) / 2147483648.0; } } }
-        AudioBufferRef::S8(b) => { for ch in 0..b.spec().channels.count() { for (i, &s) in b.chan(ch).iter().enumerate() { result[ch][i] = s as f32 / 128.0; } } }
-        AudioBufferRef::S16(b) => { for ch in 0..b.spec().channels.count() { for (i, &s) in b.chan(ch).iter().enumerate() { result[ch][i] = s as f32 / 32768.0; } } }
-        AudioBufferRef::S24(b) => { for ch in 0..b.spec().channels.count() { for (i, &s) in b.chan(ch).iter().enumerate() { result[ch][i] = s.0 as f32 / 8388608.0; } } }
-        AudioBufferRef::S32(b) => { for ch in 0..b.spec().channels.count() { for (i, &s) in b.chan(ch).iter().enumerate() { result[ch][i] = s as f32 / 2147483648.0; } } }
-        AudioBufferRef::F32(b) => { for ch in 0..b.spec().channels.count() { result[ch].copy_from_slice(b.chan(ch)); } }
-        AudioBufferRef::F64(b) => { for ch in 0..b.spec().channels.count() { for (i, &s) in b.chan(ch).iter().enumerate() { result[ch][i] = s as f32; } } }
+        AudioBufferRef::U8(b) => { for (ch, dst_ch) in result.iter_mut().enumerate().take(b.spec().channels.count()) { for (i, &s) in b.chan(ch).iter().enumerate() { dst_ch[i] = (s as f32 - 128.0) / 128.0; } } }
+        AudioBufferRef::U16(b) => { for (ch, dst_ch) in result.iter_mut().enumerate().take(b.spec().channels.count()) { for (i, &s) in b.chan(ch).iter().enumerate() { dst_ch[i] = (s as f32 - 32768.0) / 32768.0; } } }
+        AudioBufferRef::U24(b) => { for (ch, dst_ch) in result.iter_mut().enumerate().take(b.spec().channels.count()) { for (i, &s) in b.chan(ch).iter().enumerate() { dst_ch[i] = (s.0 as f32 - 8388608.0) / 8388608.0; } } }
+        AudioBufferRef::U32(b) => { for (ch, dst_ch) in result.iter_mut().enumerate().take(b.spec().channels.count()) { for (i, &s) in b.chan(ch).iter().enumerate() { dst_ch[i] = (s as f32 - 2147483648.0) / 2147483648.0; } } }
+        AudioBufferRef::S8(b) => { for (ch, dst_ch) in result.iter_mut().enumerate().take(b.spec().channels.count()) { for (i, &s) in b.chan(ch).iter().enumerate() { dst_ch[i] = s as f32 / 128.0; } } }
+        AudioBufferRef::S16(b) => { for (ch, dst_ch) in result.iter_mut().enumerate().take(b.spec().channels.count()) { for (i, &s) in b.chan(ch).iter().enumerate() { dst_ch[i] = s as f32 / 32768.0; } } }
+        AudioBufferRef::S24(b) => { for (ch, dst_ch) in result.iter_mut().enumerate().take(b.spec().channels.count()) { for (i, &s) in b.chan(ch).iter().enumerate() { dst_ch[i] = s.0 as f32 / 8388608.0; } } }
+        AudioBufferRef::S32(b) => { for (ch, dst_ch) in result.iter_mut().enumerate().take(b.spec().channels.count()) { for (i, &s) in b.chan(ch).iter().enumerate() { dst_ch[i] = s as f32 / 2147483648.0; } } }
+        AudioBufferRef::F32(b) => { for (ch, dst_ch) in result.iter_mut().enumerate().take(b.spec().channels.count()) { dst_ch.copy_from_slice(b.chan(ch)); } }
+        AudioBufferRef::F64(b) => { for (ch, dst_ch) in result.iter_mut().enumerate().take(b.spec().channels.count()) { for (i, &s) in b.chan(ch).iter().enumerate() { dst_ch[i] = s as f32; } } }
     }
 }

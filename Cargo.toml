@@ -10,6 +10,5 @@ livi = "0.4"
 symphonia = { version = "0.5", features = ["all"] }
 hound = "3"
 anyhow = "1"
-thiserror = "1"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_yaml = "0.9.34"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9" # Deprecated, but kept for now as replacements are immature

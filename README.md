@@ -52,7 +52,7 @@ lv2render -i <INPUT_FILE> -o <OUTPUT_FILE> [CHAIN...] [OPTIONS]
 Plugins are applied in the order they appear on the command line.
 
 ```bash
-lv2render -i in.wav -o out.wav "calf Reverb:decay_time=0.5" "master_me:input gain=3" "BassEnhancer"
+lv2render -i in.wav -o out.wav "Calf Reverb:Decay time=0.5" "master_me:input gain=3" "Calf Bass Enhancer"
 ```
 
 ### YAML Chain (`-f`)
@@ -61,11 +61,11 @@ For complex setups, use a YAML file. It supports multiple formats:
 
 ```yaml
 # effect-chain.yaml
-- "calf Reverb:decay_time=0.5" # String format
+- "Calf Reverb:Decay time=0.5" # String format
 - master_me:                   # Key-List format
     - leveler bypass=1
     - input gain=3
-- BassEnhancer                 # Simple name
+- Calf Bass Enhancer           # Simple name
 ```
 
 Run with:

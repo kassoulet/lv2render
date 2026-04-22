@@ -1,6 +1,6 @@
 # lv2render
 
-A high-performance, CLI-based offline audio processor for LV2 plugins written in Rust.
+A small, CLI-based offline audio processor for LV2 plugins written in Rust.
 
 ## Overview
 
@@ -92,6 +92,10 @@ lv2render -i input.wav -o output.wav -f effect-chain.yaml
 - **First Plugin**: Supports mono-to-stereo upmix if the input is mono and the plugin is stereo.
 - **The Chain**: Each plugin must have an input channel count matching the output of the previous plugin.
 - **Output**: Always 32-bit float WAV.
+
+## Roadmap
+- Support sample rate / bit depth / channel number output
+- Add bpm
 
 ## License
 

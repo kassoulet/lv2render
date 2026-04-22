@@ -7,10 +7,26 @@ use crate::plugin::PluginSetting;
 /// Used by CLI and YAML parsing.
 pub fn parse_plugin_setting(s: &str) -> Result<PluginSetting, String> {
     let parts: Vec<&str> = s.split(':').collect();
-    let plugin_identifier = parts[0].trim().to_string();
-    let mut params = HashMap::new();
+    let mut plugin_identifier = String::new();
     
-    for part in parts.iter().skip(1) {
+    let mut i = 0;
+    while i < parts.len() {
+        if parts[i].contains('=') {
+            break;
+        }
+        if !plugin_identifier.is_empty() {
+            plugin_identifier.push(':');
+        }
+        plugin_identifier.push_str(parts[i].trim());
+        i += 1;
+    }
+
+    if plugin_identifier.is_empty() {
+        return Err("Missing plugin identifier".to_string());
+    }
+
+    let mut params = HashMap::new();
+    for part in parts.iter().skip(i) {
         if part.trim().is_empty() {
             continue;
         }
@@ -19,7 +35,6 @@ pub fn parse_plugin_setting(s: &str) -> Result<PluginSetting, String> {
                 params.insert(k, v);
             }
             Err(e) => {
-                // Return an error for malformed key=value instead of silently skipping
                 return Err(format!("Malformed parameter '{}': {}", part, e));
             }
         }

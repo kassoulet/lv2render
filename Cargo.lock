@@ -287,6 +287,7 @@ dependencies = [
  "anyhow",
  "clap",
  "hound",
+ "libc",
  "livi",
  "serde",
  "serde_yaml",

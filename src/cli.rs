@@ -28,4 +28,8 @@ pub struct Args {
     /// Seconds of silence to drain after input EOF (for reverb/delay tails)
     #[arg(long, default_value_t = 2.0)]
     pub drain_seconds: f64,
+
+    /// Suppress all stderr output (hides lilv warnings)
+    #[arg(short, long)]
+    pub quiet: bool,
 }

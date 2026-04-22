@@ -16,9 +16,8 @@ fn run_render_test(input_filename: &str) {
        .arg("--")
        .arg("--input").arg(&input_path)
        .arg("--output").arg(&output_path)
-       .arg("http://calf.sourceforge.net/plugins/Reverb")
-       // Redirect stderr to /dev/null to suppress verbose lilv warnings
-       .stderr(std::process::Stdio::null());
+       .arg("--quiet")
+       .arg("http://calf.sourceforge.net/plugins/Reverb");
 
     let status = cmd.status().expect("Failed to execute command");
 

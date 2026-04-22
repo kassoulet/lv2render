@@ -21,6 +21,17 @@ const ATOM_SEQUENCE_SIZE: usize = 1024;
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if args.quiet {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            if let Ok(dev_null) = std::fs::File::open("/dev/null") {
+                unsafe {
+                    libc::dup2(dev_null.as_raw_fd(), libc::STDERR_FILENO);
+                }
+            }
+        }
+    }
     println!("Initializing LV2 world...");
     let world = World::new();
 

@@ -12,3 +12,4 @@ hound = "3"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9" # Deprecated, but kept for now as replacements are immature
+libc = "0.2"

@@ -5,6 +5,10 @@ fn run_render_test(input_filename: &str) {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let input_path = root.join("tests/audio").join(input_filename);
     let output_dir = root.join("tests/audio/output");
+    
+    // Ensure the output directory exists
+    std::fs::create_dir_all(&output_dir).unwrap();
+    
     let output_path = output_dir.join(format!("{}.wav", input_filename));
 
     if output_path.exists() {

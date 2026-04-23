@@ -50,9 +50,25 @@ pub fn parse_key_value(s: &str) -> Result<(String, f32)> {
     if kv.len() == 2 {
         let key = kv[0].trim().to_string();
         let value = kv[1].parse::<f32>().map_err(|_| anyhow!("Invalid numeric value: {}", kv[1]))?;
+        if !value.is_finite() {
+            bail!("Parameter '{}' must be a finite number", key);
+        }
         Ok((key, value))
     } else {
         bail!("Expected key=value pair")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_key_value_validation() {
+        assert!(parse_key_value("gain=1.0").is_ok());
+        assert!(parse_key_value("gain=NaN").is_err());
+        assert!(parse_key_value("gain=inf").is_err());
+        assert!(parse_key_value("gain=-inf").is_err());
     }
 }
 

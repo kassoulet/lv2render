@@ -21,6 +21,24 @@ const ATOM_SEQUENCE_SIZE: usize = 1024;
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    if args.block_size == 0 || args.block_size > 1_048_576 {
+        bail!("Block size must be between 1 and 1,048,576");
+    }
+    if args.drain_seconds < 0.0 || args.drain_seconds > 3600.0 {
+        bail!("Drain seconds must be between 0 and 3,600");
+    }
+    if !args.drain_seconds.is_finite() {
+        bail!("Drain seconds must be a finite number");
+    }
+    if let (Ok(input_abs), Ok(output_abs)) = (args.input.canonicalize(), args.output.canonicalize()) {
+        if input_abs == output_abs {
+            bail!("Input and output files must be different");
+        }
+    } else if args.input == args.output {
+        bail!("Input and output files must be different");
+    }
+
     if args.quiet {
         #[cfg(unix)]
         {

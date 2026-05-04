@@ -44,6 +44,8 @@ pub fn setup_input_audio(input_path: &Path) -> Result<AudioInput> {
 
 use symphonia::core::conv::IntoSample;
 
+/// This function is deprecated and will be removed in a future version.
+/// Use `copy_to_planar_f32` for better performance.
 pub fn copy_to_f32_buffer(buf: AudioBufferRef<'_>, result: &mut [Vec<f32>]) {
     macro_rules! convert_buf {
         ($buf:expr) => {
@@ -67,6 +69,49 @@ pub fn copy_to_f32_buffer(buf: AudioBufferRef<'_>, result: &mut [Vec<f32>]) {
         AudioBufferRef::F32(b) => {
             for (ch, dst_ch) in result.iter_mut().enumerate().take(b.spec().channels.count()) {
                 dst_ch.copy_from_slice(b.chan(ch));
+            }
+        }
+        AudioBufferRef::F64(b) => convert_buf!(b),
+    }
+}
+
+pub fn copy_to_planar_f32(
+    buf: &AudioBufferRef<'_>,
+    dst: &mut [f32],
+    src_offset: usize,
+    dst_offset: usize,
+    num_frames: usize,
+    block_size: usize,
+) {
+    let dst_channels = dst.len() / block_size;
+    macro_rules! convert_buf {
+        ($buf:expr) => {
+            for ch in 0..std::cmp::min($buf.spec().channels.count(), dst_channels) {
+                let dst_start = ch * block_size + dst_offset;
+                let src_ch = $buf.chan(ch);
+                let src_slice = &src_ch[src_offset..src_offset + num_frames];
+                for (i, &s) in src_slice.iter().enumerate() {
+                    dst[dst_start + i] = s.into_sample();
+                }
+            }
+        };
+    }
+
+    match buf {
+        AudioBufferRef::U8(b) => convert_buf!(b),
+        AudioBufferRef::U16(b) => convert_buf!(b),
+        AudioBufferRef::U24(b) => convert_buf!(b),
+        AudioBufferRef::U32(b) => convert_buf!(b),
+        AudioBufferRef::S8(b) => convert_buf!(b),
+        AudioBufferRef::S16(b) => convert_buf!(b),
+        AudioBufferRef::S24(b) => convert_buf!(b),
+        AudioBufferRef::S32(b) => convert_buf!(b),
+        AudioBufferRef::F32(b) => {
+            for ch in 0..std::cmp::min(b.spec().channels.count(), dst_channels) {
+                let dst_start = ch * block_size + dst_offset;
+                let src_ch = b.chan(ch);
+                let src_slice = &src_ch[src_offset..src_offset + num_frames];
+                dst[dst_start..dst_start + num_frames].copy_from_slice(src_slice);
             }
         }
         AudioBufferRef::F64(b) => convert_buf!(b),

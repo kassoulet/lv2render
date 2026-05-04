@@ -56,11 +56,12 @@ fn main() -> Result<()> {
     let plugins = if let Some(config_path) = &args.file {
         load_chain_from_yaml(config_path)?
     } else {
-        if args.plugins.is_empty() {
-            bail!("At least one plugin must be specified via CLI or config file (-f)");
-        }
         args.plugins
     };
+
+    if plugins.is_empty() {
+        bail!("At least one plugin must be specified via CLI or config file (-f)");
+    }
 
     println!("Probing input file: {:?}", args.input);
     let mut audio_input = setup_input_audio(&args.input)?;

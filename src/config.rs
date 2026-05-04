@@ -108,6 +108,9 @@ pub fn load_chain_from_yaml(config_path: &Path) -> Result<Vec<PluginSetting>> {
                     for (pk, pv) in param_map {
                         let p_name = pk.as_str().ok_or_else(|| anyhow!("Param name must be a string"))?;
                         let p_val = pv.as_f64().ok_or_else(|| anyhow!("Param value for '{}' must be a number", p_name))? as f32;
+                        if !p_val.is_finite() {
+                            bail!("Parameter '{}' must be a finite number", p_name);
+                        }
                         params.insert(p_name.to_string(), p_val);
                     }
                 }

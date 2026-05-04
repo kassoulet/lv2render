@@ -1,0 +1,3 @@
+## 2025-05-15 - [Optimization Pattern: Zero-Allocation Hot Loops in Audio Processing]
+**Learning:** Performance in audio processing is heavily impacted by per-block heap allocations. The `livi` crate's API allows passing iterators for port connections, which can be leveraged to eliminate `Vec` allocations in the hot loop. Additionally, double-buffering can be avoided by copying directly from the decoder's buffer into a planar plugin buffer.
+**Action:** Always check if library APIs support iterators or pre-allocated slices for high-frequency operations. When dealing with multi-channel audio, ensure that channel-copying logic is robust against channel mismatches to avoid panics.
